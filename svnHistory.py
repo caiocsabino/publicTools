@@ -8,6 +8,8 @@ bug_report_pattern = "SCM-"
 
 authors_to_exclude = ["eagle", "neojenkins"]
 
+debug_authors_list = []
+
 TAG_REVISION = "revision"
 TAG_DATE = "date"
 TAG_DATE_YEAR_MONTH = "date_year_month"
@@ -22,6 +24,13 @@ TAG_FILES_REMOVED = "files_removed"
 TAG_LINES_ADDED = "lines_added"
 TAG_LINES_REMOVED = "lines_removed"
 TAG_BUGS_MENTIONED = "bugs_mentioned"
+TAG_COPIED_LARGE_ADDITIONS = "copied_large_additions"
+TAG_BINARIES_CHANGED = "binaries_changed"
+
+binary_files_to_ignore_in_line_count = [".stamp", ".dbg", ".so", ".map"]
+
+# if there's a svn diff which detects more lnes were added than this threshold, it shouldn't be considered authored, probably was copied
+large_added_files_threshold = 5000
 
 def get_month_index(date_str):
 
@@ -45,6 +54,17 @@ def get_first_line(input_string):
         first_line = ""
 
     return first_line
+
+def get_last_line(multiline_string):
+    # Split the multiline string into lines
+    lines = multiline_string.splitlines()
+
+    # Check if there are lines
+    if lines:
+        return lines[-1]  # Return the last line
+    else:
+        return None  # Return None if the multiline string is empty
+
 
 
 def remove_first_line(input_string):
@@ -96,29 +116,49 @@ def count_line_changes(input_string, addition):
 log_line_pattern = r'^r(\d+) \| (\w+) \| (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+\-]\d{4}) \(.*\) \| (\d+) line[s]?'
 log_line_regex = re.compile(log_line_pattern)
 
+#SVN HISTORY
+# ------------------------------------------------------------------------
+# commit data
+
+# commit comment
+
+
+#SVN DIFF
+# Index: data_advisorTest/data/ui3d/models/advisorTrains_top.geo
+# ===================================================================
+
 # separates an input string in sectors delimited by a line separator
-def get_sectors(input, separator):
+def get_sectors(input, separator, include_headers):
     # Initialize an array to store the entries
     input_lines = input.splitlines()
     entries = []
 
     entry_lines = []  # Temporary list to store lines of each entry
+    headers = []
     capture_entry = False  # Flag to indicate when to capture an entry
 
+    previous_line = ""
     for line in input_lines:
         line = line.rstrip()  # Remove trailing newline characters
 
-        # Check if the line consists of dashes repeated 72 times
+        # Check if the line consists of the separator
         if line == separator:
             if capture_entry:
                 # Join the lines of the current entry and add it to the entries list
                 entries.append("\n".join(entry_lines))
                 entry_lines = []  # Clear the temporary list
+
             else:
                 capture_entry = True  # Start capturing the next entry
+
+            if include_headers:
+                entry_lines.append(previous_line)
+                entry_lines.append(separator)
         elif capture_entry:
             # Append the line to the temporary list for the current entry
             entry_lines.append(line)
+
+        previous_line = line
         
 
     # Check if there's any remaining entry to capture
@@ -135,11 +175,12 @@ def parse_svn_log(log_file_path):
 
     # Read the text file
     with open(log_file_path, "r") as file:
-        entries = get_sectors(file.read(), "------------------------------------------------------------------------")
+        entries = get_sectors(file.read(), "------------------------------------------------------------------------", False)
 
     log_entries = []
 
     for entry in entries:
+
         commitLine = get_first_line(entry)
         comment = remove_empty_lines(entry)
         comment = remove_first_line(comment)
@@ -165,7 +206,8 @@ def parse_svn_diff(revision, repo_dir, commit_message):
 
     diff_result = subprocess.check_output(command, shell=True, stderr=subprocess.STDOUT, universal_newlines=True)
 
-    diff_sectors = get_sectors(diff_result, "===================================================================")
+    diff_sectors = get_sectors(diff_result, "===================================================================", True)
+
 
     os.chdir(current_directory)
 
@@ -174,38 +216,92 @@ def parse_svn_diff(revision, repo_dir, commit_message):
     changes[TAG_LINES_ADDED] = 0
     changes[TAG_LINES_REMOVED] = 0
     changes[TAG_BUGS_MENTIONED] = 0
+    changes[TAG_BINARIES_CHANGED] = 0
+    changes[TAG_COPIED_LARGE_ADDITIONS] = 0
+
+    binary_files_listed = {}
+
+    file_name_pattern = r"---\s(.+?)\s\("
 
     added_file_pattern = r"^---.*\(nonexistent\)$"
     removed_file_pattern = r"^\+\+\+.*\(nonexistent\)$"
 
     for sector in diff_sectors:
 
+        sector_header = get_first_line(sector)
+
+         # Use re.search to find the match
+        file_name_match = re.search(file_name_pattern, sector)
+
+        # skips binary files
+        skip_file = False
+
+        skipped = ""
+
+        if file_name_match:
+            file_path = file_name_match.group(1)
+
+
+            for binary_file_extension in binary_files_to_ignore_in_line_count:
+                if file_path.endswith(binary_file_extension):
+                    skip_file = True
+                    # print("found " + file_path)
+                    binary_files_listed[file_path] = True
+                    skipped = file_path
+                    break
+
+        if sector_header.startswith("Index: "):
+            # Remove the "Index: " tag to get the file path
+            header_file_path = sector_header[len("Index: "):]
+
+            for binary_file_extension in binary_files_to_ignore_in_line_count:
+                if header_file_path.endswith(binary_file_extension):
+                    skip_file = True
+                    # print("found " + file_path)
+                    binary_files_listed[header_file_path] = True
+                    skipped = header_file_path
+                    break
+
+        if skip_file:
+            print("skipping " +  skipped)
+            continue
+
         # Extract and print the matched lines
         matches = re.finditer(added_file_pattern, sector, re.MULTILINE)
 
         matched_lines_addition = [match.group(0) for match in matches]
         for line in matched_lines_addition:
-            print("Added files " + line)
+            print("Added files " + line + " " + sector_header)
 
         changes[TAG_FILES_ADDED] = changes[TAG_FILES_ADDED] + len(matched_lines_addition)
 
         matches = re.finditer(removed_file_pattern, sector, re.MULTILINE)
 
         matched_lines_removal = [match.group(0) for match in matches]
+        
         for line in matched_lines_removal:
-            print("Removed files " + line)
+            print("Removed files " + line + " " + sector_header)
 
         changes[TAG_FILES_REMOVED] = changes[TAG_FILES_REMOVED] + len(matched_lines_removal)
         
-        changes[TAG_LINES_ADDED] = changes[TAG_LINES_ADDED] + count_line_changes(sector, True)
+        # IF TOO MANY LINES WERE ADDED, WE COUNT THEM AS COPIED FROM SOMEWHERE ELSE
+        lines_added_count = count_line_changes(sector, True)
+        if (lines_added_count >= large_added_files_threshold):
+            changes[TAG_COPIED_LARGE_ADDITIONS] = changes[TAG_COPIED_LARGE_ADDITIONS] + 1
+        else:
+            changes[TAG_LINES_ADDED] = changes[TAG_LINES_ADDED] + lines_added_count
 
+        # FILE WAS NOT REMOVED, COUNT IT AS MANUALLY REMOVED LINE
         if len(matched_lines_removal) == 0:
+            # print("LINES_REMOVED " + str(count_line_changes(sector, False)))
             changes[TAG_LINES_REMOVED] = changes[TAG_LINES_REMOVED] + count_line_changes(sector, False)
 
         changes[TAG_BUGS_MENTIONED] = changes[TAG_BUGS_MENTIONED] + sector.count(bug_report_pattern)
         
     # --- file (nonexistent) addition
     # +++ file (nonexistent) removal
+
+    changes[TAG_BINARIES_CHANGED] = len(binary_files_listed)
 
     return changes
 
@@ -221,7 +317,7 @@ def get_simplified_date(long_date):
         return long_date
 
 def dump_table_to_disk(table_name, table):
-    cummulative_properties = [TAG_LINES_ADDED, TAG_LINES_REMOVED, TAG_BUGS_MENTIONED, TAG_FILES_ADDED, TAG_FILES_REMOVED]
+    cummulative_properties = [TAG_LINES_ADDED, TAG_LINES_REMOVED, TAG_BUGS_MENTIONED, TAG_FILES_ADDED, TAG_FILES_REMOVED, TAG_BINARIES_CHANGED, TAG_COPIED_LARGE_ADDITIONS]
 
     author_entries = {}
 
@@ -242,7 +338,7 @@ def dump_table_to_disk(table_name, table):
             author_entries[author_name][property_name] += entry[TAG_CHANGES][property_name]
 
     # writing to CSV
-    csv_str = "Author;Commits;Lines added;Lines removed;Bugs mentioned;Files added;Files removed;\n"
+    csv_str = "Author;Commits;Lines added;Lines removed;Bugs mentioned;Files added;Files removed;Binaries changed;Copied (large additions);\n"
 
     for author_entry_name, author_entry in author_entries.items():
         csv_str += author_entry_name + ";" + str(author_entry[TAG_COMMITS]) + ";"
@@ -285,7 +381,7 @@ def main():
 
     for entry in log_entries:
 
-        if entry["author"] in authors_to_exclude:
+        if entry[TAG_AUTHOR] in authors_to_exclude or (len(debug_authors_list) > 0 and entry[TAG_AUTHOR] not in debug_authors_list):
             continue
 
         year_month = get_simplified_date(entry["date"])
@@ -296,7 +392,6 @@ def main():
             break
 
         if last_table_name != None and last_table_name != year_month:
-            print("AAA " + str(last_table_name))
             dump_table_to_disk(last_table_name, csv_tables[last_table_name])
 
         last_table_name = year_month
