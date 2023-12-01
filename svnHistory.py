@@ -2,8 +2,35 @@ import re
 import argparse
 import subprocess
 import os
+import datetime
 
 bug_report_pattern = "SCM-"
+
+authors_to_exclude = ["eagle", "neojenkins"]
+
+TAG_REVISION = "revision"
+TAG_DATE = "date"
+TAG_DATE_YEAR_MONTH = "date_year_month"
+TAG_LINE_COUNT = "line_count"
+TAG_AUTHOR = "author"
+TAG_COMMENT = "comment"
+TAG_CHANGES = "changes"
+TAG_COMMITS = "commits"
+
+TAG_FILES_ADDED = "files_added"
+TAG_FILES_REMOVED = "files_removed"
+TAG_LINES_ADDED = "lines_added"
+TAG_LINES_REMOVED = "lines_removed"
+TAG_BUGS_MENTIONED = "bugs_mentioned"
+
+def get_month_index(date_str):
+
+    zero_year = 2010
+
+    year = int(date_str[:4])
+    month = int(date_str[5:7])
+
+    return (year - zero_year) * 12 + month 
 
 def get_first_line(input_string):
     # Split the input string into lines
@@ -121,11 +148,11 @@ def parse_svn_log(log_file_path):
         if match:
             revision, author, date, line_count = match.groups()
             log_entries.append({
-                'revision': int(revision),
-                'author': author,
-                'date': date,
-                'line_count': int(line_count),
-                'comment': comment
+                TAG_REVISION: int(revision),
+                TAG_AUTHOR: author,
+                TAG_DATE: date,
+                TAG_LINE_COUNT: int(line_count),
+                TAG_COMMENT: comment
             })
 
     return log_entries
@@ -142,13 +169,11 @@ def parse_svn_diff(revision, repo_dir, commit_message):
 
     os.chdir(current_directory)
 
-    changes["files_added"] = 0
-    changes["files_removed"] = 0
-    changes["lines_added"] = 0
-    changes["lines_removed"] = 0
-    changes["bugs_mentioned"] = 0
-    changes["files_added"] = 0
-    changes["files_removed"] = 0
+    changes[TAG_FILES_ADDED] = 0
+    changes[TAG_FILES_REMOVED] = 0
+    changes[TAG_LINES_ADDED] = 0
+    changes[TAG_LINES_REMOVED] = 0
+    changes[TAG_BUGS_MENTIONED] = 0
 
     added_file_pattern = r"^---.*\(nonexistent\)$"
     removed_file_pattern = r"^\+\+\+.*\(nonexistent\)$"
@@ -162,7 +187,7 @@ def parse_svn_diff(revision, repo_dir, commit_message):
         for line in matched_lines_addition:
             print("Added files " + line)
 
-        changes["files_added"] = changes["files_added"] + len(matched_lines_addition)
+        changes[TAG_FILES_ADDED] = changes[TAG_FILES_ADDED] + len(matched_lines_addition)
 
         matches = re.finditer(removed_file_pattern, sector, re.MULTILINE)
 
@@ -170,25 +195,71 @@ def parse_svn_diff(revision, repo_dir, commit_message):
         for line in matched_lines_removal:
             print("Removed files " + line)
 
-        changes["files_removed"] = changes["files_removed"] + len(matched_lines_removal)
+        changes[TAG_FILES_REMOVED] = changes[TAG_FILES_REMOVED] + len(matched_lines_removal)
         
-        changes["lines_added"] = changes["lines_added"] + count_line_changes(sector, True)
+        changes[TAG_LINES_ADDED] = changes[TAG_LINES_ADDED] + count_line_changes(sector, True)
 
         if len(matched_lines_removal) == 0:
-            changes["lines_removed"] = changes["lines_removed"] + count_line_changes(sector, False)
+            changes[TAG_LINES_REMOVED] = changes[TAG_LINES_REMOVED] + count_line_changes(sector, False)
 
-        changes["bugs_mentioned"] = changes["bugs_mentioned"] + sector.count(bug_report_pattern)
+        changes[TAG_BUGS_MENTIONED] = changes[TAG_BUGS_MENTIONED] + sector.count(bug_report_pattern)
         
     # --- file (nonexistent) addition
     # +++ file (nonexistent) removal
 
     return changes
 
+def get_simplified_date(long_date):
+    date_pattern = r"(\d{4}-\d{2})"
+
+    match = re.search(date_pattern, long_date)
+
+    if match:
+        date_str = match.group(1)
+        return date_str
+    else:
+        return long_date
+
+def dump_table_to_disk(table_name, table):
+    cummulative_properties = [TAG_LINES_ADDED, TAG_LINES_REMOVED, TAG_BUGS_MENTIONED, TAG_FILES_ADDED, TAG_FILES_REMOVED]
+
+    author_entries = {}
+
+    for entry in table:
+
+        author_name = entry[TAG_AUTHOR]
+
+        if author_name not in author_entries:
+            author_entries[author_name] = {}
+            author_entries[author_name][TAG_COMMITS] = 0
+
+            for property_name in cummulative_properties:
+                author_entries[author_name][property_name] = 0
+
+        author_entries[author_name][TAG_COMMITS] += 1
+
+        for property_name in cummulative_properties:
+            author_entries[author_name][property_name] += entry[TAG_CHANGES][property_name]
+
+    # writing to CSV
+    csv_str = "Author;Commits;Lines added;Lines removed;Bugs mentioned;Files added;Files removed;\n"
+
+    for author_entry_name, author_entry in author_entries.items():
+        csv_str += author_entry_name + ";" + str(author_entry[TAG_COMMITS]) + ";"
+        for property_name in cummulative_properties:
+            csv_str += str(author_entry[property_name]) + ";"
+        csv_str += "\n"
+
+    with open(table_name + ".csv", "w", encoding="utf-8") as file:
+        # Write the content to the file
+        file.write(csv_str)
+
 def main():
     # Create a command-line argument parser
     parser = argparse.ArgumentParser(description='Parse SVN log file')
     parser.add_argument('input_file', help='Path to the SVN log file')
-    parser.add_argument('repo_dir', help='Path to the SVN repository directorye')
+    parser.add_argument('repo_dir', help='Path to the SVN repository directory')
+    parser.add_argument('months', help='How many previous months to analyze')
 
     # Parse command-line arguments
     args = parser.parse_args()
@@ -196,49 +267,57 @@ def main():
     # Parse the SVN log file and get log entries
     log_entries = parse_svn_log(args.input_file)
 
-    # Print the parsed log entries
+    current_date = datetime.datetime.now()
 
+    formatted_date = current_date.strftime("%Y-%m-%d")
 
-    collection = {}
+    current_month_index = get_month_index(formatted_date)
 
-    revisions = []
+    months = int(args.months)
 
-    cutoff = 0
+    lowest_month_index = int(current_month_index) - months
 
-    unsortedEntries = []
+    if months < 0:
+        lowest_month_index = 0
+
+    last_table_name = None
+    csv_tables = {}
 
     for entry in log_entries:
-        if not entry["author"] in collection:
-            collection[entry["author"]] = []
 
-        entryObj = {}
-        entryObj["revision"] = entry["revision"]
-        entryObj["date"] = entry["date"]
-        entryObj["line_count"] = entry["line_count"]
-        print("Parsing commit " + str(entry["revision"]))
-        entryObj["changes"] = parse_svn_diff(int(entry["revision"]), args.repo_dir, entry["comment"])
-        entryObj["author"] = entry["author"]
+        if entry["author"] in authors_to_exclude:
+            continue
 
-        revisions.append(int(entryObj["revision"]))
+        year_month = get_simplified_date(entry["date"])
+        year_month_index = get_month_index(year_month)
 
-        collection[entry["author"]].append(entryObj)
-
-        unsortedEntries.append(entryObj)
-
-        cutoff = cutoff + 1
-
-        if cutoff > 10:
+        if year_month_index < lowest_month_index:
+            print("BREAK " + str(year_month_index) + " "  + str(lowest_month_index))
             break
 
-    for entry in unsortedEntries:
-        print("ENTRY " + str(entry))
+        if last_table_name != None and last_table_name != year_month:
+            print("AAA " + str(last_table_name))
+            dump_table_to_disk(last_table_name, csv_tables[last_table_name])
 
+        last_table_name = year_month
 
-    authors = []
-    sorted_revisions = sorted(revisions, reverse=True)
+        if year_month not in csv_tables:
+            csv_tables[year_month] = []
 
-    for k, v in collection.items():
-        authors.append(k)
+        # print("DATE " + year_month)
+        entryObj = {}
+        entryObj[TAG_REVISION] = entry[TAG_REVISION]
+        entryObj[TAG_DATE] = entry[TAG_DATE]
+        entryObj[TAG_DATE_YEAR_MONTH] = get_simplified_date(entry[TAG_DATE])
+        entryObj[TAG_LINE_COUNT] = entry[TAG_LINE_COUNT]
+        print("Parsing commit " + str(entry[TAG_REVISION]))
+        entryObj[TAG_CHANGES] = parse_svn_diff(int(entry[TAG_REVISION]), args.repo_dir, entry[TAG_COMMENT])
+        entryObj[TAG_AUTHOR] = entry[TAG_AUTHOR]
+
+        csv_tables[year_month].append(entryObj)
+
+    if last_table_name != None and last_table_name != year_month:
+        dump_table_to_disk(last_table_name, csv_tables[last_table_name])
 
 if __name__ == '__main__':
     main()
