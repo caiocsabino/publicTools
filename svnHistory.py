@@ -46,6 +46,20 @@ def remove_empty_lines(input_string):
 
     return result_string
 
+def count_addition_lines(input_string):
+    # Split the input string into lines
+    lines = input_string.splitlines()
+
+    # Initialize a counter for lines starting with a single "+"
+    count = 0
+
+    for line in lines:
+        # Check if the line starts with a single "+"
+        if line.startswith('+') and not line.startswith('++') and not line.startswith('+*'):
+            count += 1
+
+    return count
+
 # Regular expression pattern to match the SVN log line format
 log_line_pattern = r'^r(\d+) \| (\w+) \| (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+\-]\d{4}) \(.*\) \| (\d+) line[s]?'
 log_line_regex = re.compile(log_line_pattern)
@@ -109,7 +123,7 @@ def parse_svn_diff(revision, repo_dir, commit_message):
 
     os.chdir(current_directory)
 
-    changes["lines_added"] = 0
+    changes["lines_added"] = count_addition_lines(diff_result)
     changes["lines_removed"] = 0
     changes["bugs_mentioned"] = commit_message.count(bug_report_pattern)
     changes["files_added"] = 0
@@ -184,6 +198,9 @@ def main():
 
         if cutoff > 10:
             break
+
+    for entry in unsortedEntries:
+        print("ENTRY " + str(entry))
 
 
     authors = []
