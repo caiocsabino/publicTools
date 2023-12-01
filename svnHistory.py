@@ -46,7 +46,7 @@ def remove_empty_lines(input_string):
 
     return result_string
 
-def count_addition_lines(input_string):
+def count_line_changes(input_string, addition):
     # Split the input string into lines
     lines = input_string.splitlines()
 
@@ -55,14 +55,51 @@ def count_addition_lines(input_string):
 
     for line in lines:
         # Check if the line starts with a single "+"
-        if line.startswith('+') and not line.startswith('++') and not line.startswith('+*'):
-            count += 1
+        if addition == True:
+            if line.startswith('+') and not line.startswith('++') and not line.startswith('+*'):
+                count += 1
+        else:
+             if line.startswith('-') and not line.startswith('--') and not line.startswith('-*'):
+                count += 1
+        
 
     return count
 
 # Regular expression pattern to match the SVN log line format
 log_line_pattern = r'^r(\d+) \| (\w+) \| (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+\-]\d{4}) \(.*\) \| (\d+) line[s]?'
 log_line_regex = re.compile(log_line_pattern)
+
+# separates an input string in sectors delimited by a line separator
+def get_sectors(input, separator):
+    # Initialize an array to store the entries
+    input_lines = input.splitlines()
+    entries = []
+
+    entry_lines = []  # Temporary list to store lines of each entry
+    capture_entry = False  # Flag to indicate when to capture an entry
+
+    for line in input_lines:
+        line = line.rstrip()  # Remove trailing newline characters
+
+        # Check if the line consists of dashes repeated 72 times
+        if line == separator:
+            if capture_entry:
+                # Join the lines of the current entry and add it to the entries list
+                entries.append("\n".join(entry_lines))
+                entry_lines = []  # Clear the temporary list
+            else:
+                capture_entry = True  # Start capturing the next entry
+        elif capture_entry:
+            # Append the line to the temporary list for the current entry
+            entry_lines.append(line)
+        
+
+    # Check if there's any remaining entry to capture
+    if entry_lines:
+        entries.append("\n".join(entry_lines))
+
+    return entries
+
 
 def parse_svn_log(log_file_path):
 
@@ -71,27 +108,7 @@ def parse_svn_log(log_file_path):
 
     # Read the text file
     with open(log_file_path, "r") as file:
-        entry_lines = []  # Temporary list to store lines of each entry
-        capture_entry = False  # Flag to indicate when to capture an entry
-
-        for line in file:
-            line = line.rstrip()  # Remove trailing newline characters
-
-            # Check if the line consists of dashes repeated 72 times
-            if line == "-" * 72:
-                if capture_entry:
-                    # Join the lines of the current entry and add it to the entries list
-                    entries.append("\n".join(entry_lines))
-                    entry_lines = []  # Clear the temporary list
-                else:
-                    capture_entry = True  # Start capturing the next entry
-            elif capture_entry:
-                # Append the line to the temporary list for the current entry
-                entry_lines.append(line)
-
-    # Check if there's any remaining entry to capture
-    if entry_lines:
-        entries.append("\n".join(entry_lines))
+        entries = get_sectors(file.read(), "------------------------------------------------------------------------")
 
     log_entries = []
 
@@ -121,34 +138,47 @@ def parse_svn_diff(revision, repo_dir, commit_message):
 
     diff_result = subprocess.check_output(command, shell=True, stderr=subprocess.STDOUT, universal_newlines=True)
 
+    diff_sectors = get_sectors(diff_result, "===================================================================")
+
     os.chdir(current_directory)
 
-    changes["lines_added"] = count_addition_lines(diff_result)
+    changes["files_added"] = 0
+    changes["files_removed"] = 0
+    changes["lines_added"] = 0
     changes["lines_removed"] = 0
-    changes["bugs_mentioned"] = commit_message.count(bug_report_pattern)
+    changes["bugs_mentioned"] = 0
     changes["files_added"] = 0
     changes["files_removed"] = 0
 
     added_file_pattern = r"^---.*\(nonexistent\)$"
     removed_file_pattern = r"^\+\+\+.*\(nonexistent\)$"
 
-    # Extract and print the matched lines
-    matches = re.finditer(added_file_pattern, diff_result, re.MULTILINE)
+    for sector in diff_sectors:
 
-    matched_lines = [match.group(0) for match in matches]
-    for line in matched_lines:
-        print("Added files " + line)
+        # Extract and print the matched lines
+        matches = re.finditer(added_file_pattern, sector, re.MULTILINE)
 
-    changes["files_added"] = len(matched_lines)
+        matched_lines_addition = [match.group(0) for match in matches]
+        for line in matched_lines_addition:
+            print("Added files " + line)
 
-    matches = re.finditer(removed_file_pattern, diff_result, re.MULTILINE)
+        changes["files_added"] = changes["files_added"] + len(matched_lines_addition)
 
-    matched_lines = [match.group(0) for match in matches]
-    for line in matched_lines:
-        print("Removed files " + line)
+        matches = re.finditer(removed_file_pattern, sector, re.MULTILINE)
 
-    changes["files_removed"] = len(matched_lines)
+        matched_lines_removal = [match.group(0) for match in matches]
+        for line in matched_lines_removal:
+            print("Removed files " + line)
 
+        changes["files_removed"] = changes["files_removed"] + len(matched_lines_removal)
+        
+        changes["lines_added"] = changes["lines_added"] + count_line_changes(sector, True)
+
+        if len(matched_lines_removal) == 0:
+            changes["lines_removed"] = changes["lines_removed"] + count_line_changes(sector, False)
+
+        changes["bugs_mentioned"] = changes["bugs_mentioned"] + sector.count(bug_report_pattern)
+        
     # --- file (nonexistent) addition
     # +++ file (nonexistent) removal
 
@@ -185,6 +215,7 @@ def main():
         entryObj["revision"] = entry["revision"]
         entryObj["date"] = entry["date"]
         entryObj["line_count"] = entry["line_count"]
+        print("Parsing commit " + str(entry["revision"]))
         entryObj["changes"] = parse_svn_diff(int(entry["revision"]), args.repo_dir, entry["comment"])
         entryObj["author"] = entry["author"]
 
