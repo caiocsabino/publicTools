@@ -26,8 +26,13 @@ TAG_LINES_REMOVED = "lines_removed"
 TAG_BUGS_MENTIONED = "bugs_mentioned"
 TAG_COPIED_LARGE_ADDITIONS = "copied_large_additions"
 TAG_BINARIES_CHANGED = "binaries_changed"
+TAG_GENERATED_FILE_CHANGES = "generated_file_changes"
 
-binary_files_to_ignore_in_line_count = [".stamp", ".dbg", ".so", ".map"]
+binary_files_to_ignore_in_line_count = [".stamp", ".dbg", ".so", ".map", ".png", ".jpg"]
+code_files = [".h", ".cpp", ".mkf", ".mkb", ".xml", ".py", ".bat", ".sh", ".icf", ".json", ".kts", ".java", ".plist", ".md", ".c", ".cmake"]
+
+generated_files_directories = ["data/ui/MenuXML", "src/protobuf", "src/simcity/uiassets"]
+
 
 # if there's a svn diff which detects more lnes were added than this threshold, it shouldn't be considered authored, probably was copied
 large_added_files_threshold = 5000
@@ -64,8 +69,6 @@ def get_last_line(multiline_string):
         return lines[-1]  # Return the last line
     else:
         return None  # Return None if the multiline string is empty
-
-
 
 def remove_first_line(input_string):
     # Split the input string into lines
@@ -198,6 +201,26 @@ def parse_svn_log(log_file_path):
 
     return log_entries
 
+def header_file_path_in_list(header, input_list):
+    if header.startswith("Index: "):
+        # Remove the "Index: " tag to get the file path
+        header_file_path = header[len("Index: "):]
+
+        for directory in input_list:
+            if directory in header_file_path:
+                return True
+    return False
+
+def header_file_path_extension_in_list(header, input_list):
+    if header.startswith("Index: "):
+        # Remove the "Index: " tag to get the file path
+        header_file_path = header[len("Index: "):]
+
+        for extension in input_list:
+            if header_file_path.endswith(extension):
+                return True
+    return False
+
 def parse_svn_diff(revision, repo_dir, commit_message):
     changes = {}
     current_directory = os.getcwd()
@@ -218,10 +241,13 @@ def parse_svn_diff(revision, repo_dir, commit_message):
     changes[TAG_BUGS_MENTIONED] = 0
     changes[TAG_BINARIES_CHANGED] = 0
     changes[TAG_COPIED_LARGE_ADDITIONS] = 0
+    changes[TAG_GENERATED_FILE_CHANGES] = 0
 
     binary_files_listed = {}
+    generated_files_listed = {}
 
-    file_name_pattern = r"---\s(.+?)\s\("
+    # --- file (nonexistent) addition
+    # +++ file (nonexistent) removal
 
     added_file_pattern = r"^---.*\(nonexistent\)$"
     removed_file_pattern = r"^\+\+\+.*\(nonexistent\)$"
@@ -230,43 +256,17 @@ def parse_svn_diff(revision, repo_dir, commit_message):
 
         sector_header = get_first_line(sector)
 
-         # Use re.search to find the match
-        file_name_match = re.search(file_name_pattern, sector)
 
         # skips binary files
         skip_file = False
 
         skipped = ""
 
-        if file_name_match:
-            file_path = file_name_match.group(1)
+        is_source = header_file_path_extension_in_list(sector_header, code_files)
+        is_binary = header_file_path_extension_in_list(sector_header, binary_files_to_ignore_in_line_count)
+        is_generated = header_file_path_in_list(sector_header, generated_files_directories)
 
-
-            for binary_file_extension in binary_files_to_ignore_in_line_count:
-                if file_path.endswith(binary_file_extension):
-                    skip_file = True
-                    # print("found " + file_path)
-                    binary_files_listed[file_path] = True
-                    skipped = file_path
-                    break
-
-        if sector_header.startswith("Index: "):
-            # Remove the "Index: " tag to get the file path
-            header_file_path = sector_header[len("Index: "):]
-
-            for binary_file_extension in binary_files_to_ignore_in_line_count:
-                if header_file_path.endswith(binary_file_extension):
-                    skip_file = True
-                    # print("found " + file_path)
-                    binary_files_listed[header_file_path] = True
-                    skipped = header_file_path
-                    break
-
-        if skip_file:
-            print("skipping " +  skipped)
-            continue
-
-        # Extract and print the matched lines
+        # HANDLES FILE ADDITIONS AND REMOVALS
         matches = re.finditer(added_file_pattern, sector, re.MULTILINE)
 
         matched_lines_addition = [match.group(0) for match in matches]
@@ -284,24 +284,35 @@ def parse_svn_diff(revision, repo_dir, commit_message):
 
         changes[TAG_FILES_REMOVED] = changes[TAG_FILES_REMOVED] + len(matched_lines_removal)
         
-        # IF TOO MANY LINES WERE ADDED, WE COUNT THEM AS COPIED FROM SOMEWHERE ELSE
-        lines_added_count = count_line_changes(sector, True)
-        if (lines_added_count >= large_added_files_threshold):
-            changes[TAG_COPIED_LARGE_ADDITIONS] = changes[TAG_COPIED_LARGE_ADDITIONS] + 1
-        else:
-            changes[TAG_LINES_ADDED] = changes[TAG_LINES_ADDED] + lines_added_count
+        #HANDLES SOURCE FILE MODIFICATIONS
 
-        # FILE WAS NOT REMOVED, COUNT IT AS MANUALLY REMOVED LINE
-        if len(matched_lines_removal) == 0:
-            # print("LINES_REMOVED " + str(count_line_changes(sector, False)))
-            changes[TAG_LINES_REMOVED] = changes[TAG_LINES_REMOVED] + count_line_changes(sector, False)
+        if is_source and not is_generated and not is_binary:
+            print("SOURCE SPOTTED " + sector_header)
+            # IF TOO MANY LINES WERE ADDED, WE COUNT THEM AS COPIED FROM SOMEWHERE ELSE
+            lines_added_count = count_line_changes(sector, True)
+            if (lines_added_count >= large_added_files_threshold):
+                changes[TAG_COPIED_LARGE_ADDITIONS] = changes[TAG_COPIED_LARGE_ADDITIONS] + 1
+            else:
+                changes[TAG_LINES_ADDED] = changes[TAG_LINES_ADDED] + lines_added_count
+
+            # FILE WAS NOT REMOVED, COUNT IT AS MANUALLY REMOVED LINE
+            if len(matched_lines_removal) == 0:
+                # print("LINES_REMOVED " + str(count_line_changes(sector, False)))
+                changes[TAG_LINES_REMOVED] = changes[TAG_LINES_REMOVED] + count_line_changes(sector, False)
+
+        if is_binary:
+            print("BINARY SPOTTED " + sector_header)
+            binary_files_listed[sector_header] = True
+
+        if is_generated:
+            print("GENERATED SPOTTED " + sector_header)
+            generated_files_listed[sector_header] = True
+            
 
         changes[TAG_BUGS_MENTIONED] = changes[TAG_BUGS_MENTIONED] + sector.count(bug_report_pattern)
-        
-    # --- file (nonexistent) addition
-    # +++ file (nonexistent) removal
 
     changes[TAG_BINARIES_CHANGED] = len(binary_files_listed)
+    changes[TAG_GENERATED_FILE_CHANGES] = len(generated_files_listed)
 
     return changes
 
@@ -317,7 +328,7 @@ def get_simplified_date(long_date):
         return long_date
 
 def dump_table_to_disk(table_name, table):
-    cummulative_properties = [TAG_LINES_ADDED, TAG_LINES_REMOVED, TAG_BUGS_MENTIONED, TAG_FILES_ADDED, TAG_FILES_REMOVED, TAG_BINARIES_CHANGED, TAG_COPIED_LARGE_ADDITIONS]
+    cummulative_properties = [TAG_LINES_ADDED, TAG_LINES_REMOVED, TAG_BUGS_MENTIONED, TAG_FILES_ADDED, TAG_FILES_REMOVED, TAG_BINARIES_CHANGED, TAG_COPIED_LARGE_ADDITIONS, TAG_GENERATED_FILE_CHANGES]
 
     author_entries = {}
 
@@ -338,7 +349,7 @@ def dump_table_to_disk(table_name, table):
             author_entries[author_name][property_name] += entry[TAG_CHANGES][property_name]
 
     # writing to CSV
-    csv_str = "Author;Commits;Lines added;Lines removed;Bugs mentioned;Files added;Files removed;Binaries changed;Copied (large additions);\n"
+    csv_str = "Author;Commits;Lines added;Lines removed;Bugs mentioned;Files added;Files removed;Binaries changed;Copied (large additions);Generated files changed;\n"
 
     for author_entry_name, author_entry in author_entries.items():
         csv_str += author_entry_name + ";" + str(author_entry[TAG_COMMITS]) + ";"
@@ -392,6 +403,7 @@ def main():
             break
 
         if last_table_name != None and last_table_name != year_month:
+            print("DUMPING " + last_table_name)
             dump_table_to_disk(last_table_name, csv_tables[last_table_name])
 
         last_table_name = year_month
