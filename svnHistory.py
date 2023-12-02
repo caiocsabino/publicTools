@@ -10,6 +10,12 @@ authors_to_exclude = ["eagle", "neojenkins"]
 
 debug_authors_list = []
 
+debug_target_revision_number = None
+
+debug_target_month = None
+
+debug_logs_on = debug_target_month != None or len(debug_authors_list) > 0 or debug_target_revision_number != None
+
 TAG_REVISION = "revision"
 TAG_DATE = "date"
 TAG_DATE_YEAR_MONTH = "date_year_month"
@@ -27,14 +33,13 @@ TAG_BUGS_MENTIONED = "bugs_mentioned"
 TAG_COPIED_LARGE_ADDITIONS = "copied_large_additions"
 TAG_BINARIES_CHANGED = "binaries_changed"
 TAG_GENERATED_FILE_CHANGES = "generated_file_changes"
+TAG_FRAMEWORK_CHANGES = "framework_changes"
 
-binary_files_to_ignore_in_line_count = [".stamp", ".dbg", ".so", ".map", ".png", ".jpg", ".geo", ".skin", ".mtl"]
+binary_files_to_ignore_in_line_count = [".stamp", ".dbg", ".so", ".map", ".png", ".jpg", ".geo", ".skin", ".mtl", ".sha1"]
 code_files = [".h", ".cpp", ".mkf", ".mkb", ".xml", ".py", ".bat", ".sh", ".icf", ".json", ".kts", ".java", ".plist", ".md", ".c", ".cmake"]
-
 generated_files_directories = ["data/ui/MenuXML", "src/protobuf", "src/simcity/uiassets"]
 
-debug_target_revision_number = None
-
+framework_detection_patterns = [r"/[\w\d.]+\.framework/", r"/[\w\d.]+\.bundle/"]
 
 # if there's a svn diff which detects more lnes were added than this threshold, it shouldn't be considered authored, probably was copied
 large_added_files_threshold = 5000
@@ -223,7 +228,11 @@ def header_file_path_extension_in_list(header, input_list):
                 return True
     return False
 
-def parse_svn_diff(revision, repo_dir, commit_message):
+def debug_log(message, commit_data):
+    if debug_logs_on:
+        print(str(commit_data[TAG_REVISION]) + " (" + commit_data[TAG_AUTHOR] + "): " + message)
+
+def parse_svn_diff(revision, repo_dir, commit_data):
     changes = {}
     changes[TAG_FILES_ADDED] = 0
     changes[TAG_FILES_REMOVED] = 0
@@ -233,6 +242,7 @@ def parse_svn_diff(revision, repo_dir, commit_message):
     changes[TAG_BINARIES_CHANGED] = 0
     changes[TAG_COPIED_LARGE_ADDITIONS] = 0
     changes[TAG_GENERATED_FILE_CHANGES] = 0
+    changes[TAG_FRAMEWORK_CHANGES] = 0
 
     current_directory = os.getcwd()
     os.chdir(repo_dir)
@@ -261,6 +271,8 @@ def parse_svn_diff(revision, repo_dir, commit_message):
     binary_files_listed = {}
     generated_files_listed = {}
 
+    frameworks_listed = {}
+
     # --- file (nonexistent) addition
     # +++ file (nonexistent) removal
 
@@ -271,63 +283,78 @@ def parse_svn_diff(revision, repo_dir, commit_message):
 
         sector_header = get_first_line(sector)
 
-
-        # skips binary files
-        skip_file = False
-
-        skipped = ""
-
         is_source = header_file_path_extension_in_list(sector_header, code_files)
         is_binary = header_file_path_extension_in_list(sector_header, binary_files_to_ignore_in_line_count)
         is_generated = header_file_path_in_list(sector_header, generated_files_directories)
 
-        # HANDLES FILE ADDITIONS AND REMOVALS
-        matches = re.finditer(added_file_pattern, sector, re.MULTILINE)
+        is_framework = False
+        framework_name = ""
 
-        matched_lines_addition = [match.group(0) for match in matches]
-        for line in matched_lines_addition:
-            print("Added files " + line + " " + sector_header)
+        for pattern in framework_detection_patterns:
+            match = re.search(pattern, sector_header)
+            if match:
+                is_framework = True
+                framework_name = match.group()
+                break
 
-        changes[TAG_FILES_ADDED] = changes[TAG_FILES_ADDED] + len(matched_lines_addition)
+        # HANDLES FILE ADDITIONS AND REMOVALS (FRAMEWORKS CHANGE FILE STRUCTURE OFTEN, SO WE DON't CONSIDER THOSE AS AUTHORED)
 
-        matches = re.finditer(removed_file_pattern, sector, re.MULTILINE)
+        if not is_framework:
+            matches = re.finditer(added_file_pattern, sector, re.MULTILINE)
 
-        matched_lines_removal = [match.group(0) for match in matches]
-        
-        for line in matched_lines_removal:
-            print("Removed files " + line + " " + sector_header)
+            matched_lines_addition = [match.group(0) for match in matches]
+            for line in matched_lines_addition:
+                debug_log("Added files " + line + " " + sector_header, commit_data)
 
-        changes[TAG_FILES_REMOVED] = changes[TAG_FILES_REMOVED] + len(matched_lines_removal)
+            changes[TAG_FILES_ADDED] = changes[TAG_FILES_ADDED] + len(matched_lines_addition)
+
+            matches = re.finditer(removed_file_pattern, sector, re.MULTILINE)
+
+            matched_lines_removal = [match.group(0) for match in matches]
+            
+            for line in matched_lines_removal:
+                debug_log("Removed files " + line + " " + sector_header, commit_data)
+
+            changes[TAG_FILES_REMOVED] = changes[TAG_FILES_REMOVED] + len(matched_lines_removal)
         
         #HANDLES SOURCE FILE MODIFICATIONS
 
-        if is_source and not is_generated and not is_binary:
+        if is_source and not is_generated and not is_binary and not is_framework:
             # print("SOURCE SPOTTED " + sector_header)
             # IF TOO MANY LINES WERE ADDED, WE COUNT THEM AS COPIED FROM SOMEWHERE ELSE
             lines_added_count = count_line_changes(sector, True)
             if (lines_added_count >= large_added_files_threshold):
                 changes[TAG_COPIED_LARGE_ADDITIONS] = changes[TAG_COPIED_LARGE_ADDITIONS] + 1
+                debug_log("Large addition: " + sector_header, commit_data)
             else:
                 changes[TAG_LINES_ADDED] = changes[TAG_LINES_ADDED] + lines_added_count
+                debug_log("Source lines added: " + sector_header, commit_data)
 
             # FILE WAS NOT REMOVED, COUNT IT AS MANUALLY REMOVED LINE
             if len(matched_lines_removal) == 0:
                 # print("LINES_REMOVED " + str(count_line_changes(sector, False)))
                 changes[TAG_LINES_REMOVED] = changes[TAG_LINES_REMOVED] + count_line_changes(sector, False)
+                debug_log("Source lines removed: " + sector_header, commit_data)
 
-        if is_binary:
-            # print("BINARY SPOTTED " + sector_header)
-            binary_files_listed[sector_header] = True
+        #BINARIES, GENERATED AND FRAMEWORKS
 
-        if is_generated:
-            # print("GENERATED SPOTTED " + sector_header)
-            generated_files_listed[sector_header] = True
-            
+        if is_framework:
+            debug_log("Framework changes detected: " + sector_header + " (" + framework_name + ")", commit_data)
+            frameworks_listed[framework_name] = True
+        else:
+            if is_binary:
+                binary_files_listed[sector_header] = True
+                debug_log("Binary detected: " + sector_header, commit_data)
+
+            if is_generated:
+                debug_log("Generated files detected: " + sector_header, commit_data)
+                generated_files_listed[sector_header] = True
 
         changes[TAG_BUGS_MENTIONED] = changes[TAG_BUGS_MENTIONED] + sector.count(bug_report_pattern)
 
     changes[TAG_BINARIES_CHANGED] = len(binary_files_listed)
     changes[TAG_GENERATED_FILE_CHANGES] = len(generated_files_listed)
+    changes[TAG_FRAMEWORK_CHANGES] = len(frameworks_listed)
 
     return changes
 
@@ -343,7 +370,7 @@ def get_simplified_date(long_date):
         return long_date
 
 def dump_table_to_disk(table_name, table):
-    cummulative_properties = [TAG_LINES_ADDED, TAG_LINES_REMOVED, TAG_BUGS_MENTIONED, TAG_FILES_ADDED, TAG_FILES_REMOVED, TAG_BINARIES_CHANGED, TAG_COPIED_LARGE_ADDITIONS, TAG_GENERATED_FILE_CHANGES]
+    cummulative_properties = [TAG_LINES_ADDED, TAG_LINES_REMOVED, TAG_BUGS_MENTIONED, TAG_FILES_ADDED, TAG_FILES_REMOVED, TAG_BINARIES_CHANGED, TAG_COPIED_LARGE_ADDITIONS, TAG_GENERATED_FILE_CHANGES, TAG_FRAMEWORK_CHANGES]
 
     author_entries = {}
 
@@ -364,7 +391,7 @@ def dump_table_to_disk(table_name, table):
             author_entries[author_name][property_name] += entry[TAG_CHANGES][property_name]
 
     # writing to CSV
-    csv_str = "Author;Commits;Lines added;Lines removed;Bugs mentioned;Files added;Files removed;Binaries changed;Copied (large additions);Generated files changed;\n"
+    csv_str = "Author;Commits;Lines added;Lines removed;Bugs mentioned;Files added;Files removed;Binaries changed;Copied (large additions);Generated files changed;Frameworks changed;\n"
 
     for author_entry_name, author_entry in author_entries.items():
         csv_str += author_entry_name + ";" + str(author_entry[TAG_COMMITS]) + ";"
@@ -395,6 +422,11 @@ def main():
 
     current_month_index = get_month_index(formatted_date)
 
+    debug_month_year_index = None
+
+    if debug_target_month != None:
+        debug_month_year_index = get_month_index(debug_target_month)
+
     months = int(args.months)
 
     lowest_month_index = int(current_month_index) - months
@@ -413,9 +445,14 @@ def main():
         year_month = get_simplified_date(entry["date"])
         year_month_index = get_month_index(year_month)
 
-        if year_month_index < lowest_month_index:
-            print("BREAK " + str(year_month_index) + " "  + str(lowest_month_index))
-            break
+        #debugging for target specific month for inspection
+        if debug_month_year_index != None and debug_month_year_index != year_month_index:
+            continue
+        else:
+            # has reached month limit      
+            if year_month_index < lowest_month_index:
+                print("BREAK " + str(year_month_index) + " "  + str(lowest_month_index))
+                break
 
         if last_table_name != None and last_table_name != year_month:
             print("DUMPING " + last_table_name)
@@ -433,7 +470,7 @@ def main():
         entryObj[TAG_DATE_YEAR_MONTH] = get_simplified_date(entry[TAG_DATE])
         entryObj[TAG_LINE_COUNT] = entry[TAG_LINE_COUNT]
         print("Parsing commit " + str(entry[TAG_REVISION]))
-        entryObj[TAG_CHANGES] = parse_svn_diff(int(entry[TAG_REVISION]), args.repo_dir, entry[TAG_COMMENT])
+        entryObj[TAG_CHANGES] = parse_svn_diff(int(entry[TAG_REVISION]), args.repo_dir, entry)
         entryObj[TAG_AUTHOR] = entry[TAG_AUTHOR]
 
         csv_tables[year_month].append(entryObj)
