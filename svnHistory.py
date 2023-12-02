@@ -28,7 +28,7 @@ TAG_COPIED_LARGE_ADDITIONS = "copied_large_additions"
 TAG_BINARIES_CHANGED = "binaries_changed"
 TAG_GENERATED_FILE_CHANGES = "generated_file_changes"
 
-binary_files_to_ignore_in_line_count = [".stamp", ".dbg", ".so", ".map", ".png", ".jpg"]
+binary_files_to_ignore_in_line_count = [".stamp", ".dbg", ".so", ".map", ".png", ".jpg", ".geo", ".skin", ".mtl"]
 code_files = [".h", ".cpp", ".mkf", ".mkb", ".xml", ".py", ".bat", ".sh", ".icf", ".json", ".kts", ".java", ".plist", ".md", ".c", ".cmake"]
 
 generated_files_directories = ["data/ui/MenuXML", "src/protobuf", "src/simcity/uiassets"]
