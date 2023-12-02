@@ -33,6 +33,8 @@ code_files = [".h", ".cpp", ".mkf", ".mkb", ".xml", ".py", ".bat", ".sh", ".icf"
 
 generated_files_directories = ["data/ui/MenuXML", "src/protobuf", "src/simcity/uiassets"]
 
+debug_target_revision_number = None
+
 
 # if there's a svn diff which detects more lnes were added than this threshold, it shouldn't be considered authored, probably was copied
 large_added_files_threshold = 5000
@@ -223,17 +225,6 @@ def header_file_path_extension_in_list(header, input_list):
 
 def parse_svn_diff(revision, repo_dir, commit_message):
     changes = {}
-    current_directory = os.getcwd()
-    os.chdir(repo_dir)
-    command = "svn diff -c " + str(revision)
-
-    diff_result = subprocess.check_output(command, shell=True, stderr=subprocess.STDOUT, universal_newlines=True)
-
-    diff_sectors = get_sectors(diff_result, "===================================================================", True)
-
-
-    os.chdir(current_directory)
-
     changes[TAG_FILES_ADDED] = 0
     changes[TAG_FILES_REMOVED] = 0
     changes[TAG_LINES_ADDED] = 0
@@ -242,6 +233,30 @@ def parse_svn_diff(revision, repo_dir, commit_message):
     changes[TAG_BINARIES_CHANGED] = 0
     changes[TAG_COPIED_LARGE_ADDITIONS] = 0
     changes[TAG_GENERATED_FILE_CHANGES] = 0
+
+    current_directory = os.getcwd()
+    os.chdir(repo_dir)
+    command = "svn diff -c " + str(revision)
+
+    diff_result = None
+
+    try:
+        diff_result = subprocess.check_output(command, shell=True, stderr=subprocess.STDOUT, universal_newlines=True)
+    except subprocess.CalledProcessError as e:
+        # Handle the exception (e.g., print an error message)
+        print("SVN DIFF FAILED:", e)
+        diff_result = None
+    except Exception as e:
+        # Handle other exceptions if necessary
+        print("An error occurred:", e)
+        diff_result = None
+
+    os.chdir(current_directory)
+
+    if diff_result == None:
+        return changes
+
+    diff_sectors = get_sectors(diff_result, "===================================================================", True)
 
     binary_files_listed = {}
     generated_files_listed = {}
@@ -287,7 +302,7 @@ def parse_svn_diff(revision, repo_dir, commit_message):
         #HANDLES SOURCE FILE MODIFICATIONS
 
         if is_source and not is_generated and not is_binary:
-            print("SOURCE SPOTTED " + sector_header)
+            # print("SOURCE SPOTTED " + sector_header)
             # IF TOO MANY LINES WERE ADDED, WE COUNT THEM AS COPIED FROM SOMEWHERE ELSE
             lines_added_count = count_line_changes(sector, True)
             if (lines_added_count >= large_added_files_threshold):
@@ -301,11 +316,11 @@ def parse_svn_diff(revision, repo_dir, commit_message):
                 changes[TAG_LINES_REMOVED] = changes[TAG_LINES_REMOVED] + count_line_changes(sector, False)
 
         if is_binary:
-            print("BINARY SPOTTED " + sector_header)
+            # print("BINARY SPOTTED " + sector_header)
             binary_files_listed[sector_header] = True
 
         if is_generated:
-            print("GENERATED SPOTTED " + sector_header)
+            # print("GENERATED SPOTTED " + sector_header)
             generated_files_listed[sector_header] = True
             
 
@@ -392,7 +407,7 @@ def main():
 
     for entry in log_entries:
 
-        if entry[TAG_AUTHOR] in authors_to_exclude or (len(debug_authors_list) > 0 and entry[TAG_AUTHOR] not in debug_authors_list):
+        if entry[TAG_AUTHOR] in authors_to_exclude or (len(debug_authors_list) > 0 and entry[TAG_AUTHOR] not in debug_authors_list) or (debug_target_revision_number != None and int(entry[TAG_REVISION]) != debug_target_revision_number):
             continue
 
         year_month = get_simplified_date(entry["date"])
